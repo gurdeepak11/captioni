@@ -656,7 +656,7 @@ Rules:
 
         const data = await response.json();
         const text = data.candidates[0].content.parts[0].text.trim();
-    const clean = text.replace(/```json|```/g, '').trim();
+    const clean = text.trim();
     const parsed = JSON.parse(clean);
 
     renderCaptions(parsed.captions, parsed.hashtags);
