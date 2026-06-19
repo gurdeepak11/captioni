@@ -652,7 +652,7 @@ Rules:
             })
         });
 
-        if (!response.ok) throw new Error(`API error: ${response.status});
+        if (!response.ok) throw new Error('API error: ${response.status}');
 
         const data = await response.json();
         const text = data.candidates[0].content.parts[0].text.trim();
