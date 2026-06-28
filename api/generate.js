@@ -1,143 +1,210 @@
-// ✅ CommonJS format (NOT ESM) — required for Vercel .js serverless functions
-// ESM "export default" in a .js file causes env var timing issues on Vercel
-
+// CommonJS — required for Vercel .js serverless functions
 module.exports = async function handler(req, res) {
-  // ── CORS ──────────────────────────────────────────────────────────────────
+
+  // ── CORS ────────────────────────────────────────────────────────────────
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
-  // ── READ API KEY ──────────────────────────────────────────────────────────
+  // ── API KEY ──────────────────────────────────────────────────────────────
   const apiKey = (process.env.GEMINI_API_KEY || '').trim();
-
-  // ✅ DEBUG LOG — visible in Vercel Function Logs tab
-  console.log('[CaptionAI] Key present:', !!apiKey);
-  console.log('[CaptionAI] Key prefix:', apiKey ? apiKey.substring(0, 8) + '...' : 'NONE');
-  console.log('[CaptionAI] Node version:', process.version);
-  console.log('[CaptionAI] All env keys:', Object.keys(process.env).filter(k => k.includes('GEMINI')));
+  console.log('[CaptionAI] Key present:', !!apiKey, '| prefix:', apiKey.substring(0, 8) || 'NONE');
 
   if (!apiKey) {
     return res.status(500).json({
       error: 'API_KEY_MISSING',
-      message: 'GEMINI_API_KEY not found in Vercel Environment Variables. Add it in Vercel → Settings → Environment Variables, then Redeploy.'
+      message: 'GEMINI_API_KEY not set in Vercel Environment Variables.'
     });
   }
 
-  // ── VALIDATE REQUEST BODY ─────────────────────────────────────────────────
+  // ── REQUEST BODY ─────────────────────────────────────────────────────────
   const { prompt } = req.body || {};
-  if (!prompt || typeof prompt !== 'string' || prompt.trim() === '') {
+  if (!prompt || typeof prompt !== 'string' || !prompt.trim()) {
     return res.status(400).json({ error: 'PROMPT_MISSING', message: 'Prompt is required.' });
   }
 
-  // ── MODEL FALLBACK CHAIN ──────────────────────────────────────────────────
-  // Try models in order until one works on the free tier
-  // gemini-2.0-flash-lite → gemini-1.5-flash → gemini-1.5-flash-8b
-  const MODELS = [
-    'gemini-2.5-flash',   // Most generous free tier (30 RPM, 1500 RPD)
-    'gemini-2.5-flash',        // Fallback (15 RPM, 1500 RPD)
-    'gemini-2.5-flash',     // Last resort (15 RPM, 1500 RPD)
-  ];
+  // ── HELPERS ──────────────────────────────────────────────────────────────
 
-  // ── CALL GEMINI WITH FALLBACK ─────────────────────────────────────────────
-  let lastError = null;
+  // Parse + validate Gemini raw text → structured object or null
+  function parseGeminiText(raw) {
+    if (!raw || typeof raw !== 'string') return null;
 
-  for (const MODEL of MODELS) {
-    // ✅ CORRECT endpoint: v1beta + key as query param only
-    // Do NOT add Authorization header — that triggers Vertex AI auth (paid)
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${apiKey}`;
+    // Strip BOM + whitespace
+    let s = raw.replace(/^\uFEFF/, '').trim();
 
-    console.log(`[CaptionAI] Trying model: ${MODEL}`);
+    // Strip ALL markdown fences (handles nested / multiple)
+    s = s.replace(/```(?:json)?\s*/gi, '').replace(/```/gi, '').trim();
 
+    // Candidates to try in order
+    const candidates = [s];
+
+    // Also try: slice from first { to last }
+    const first = s.indexOf('{');
+    const last  = s.lastIndexOf('}');
+    if (first !== -1 && last > first) {
+      candidates.push(s.slice(first, last + 1));
+    }
+
+    // Also try: extract via greedy regex
+    const m = s.match(/\{[\s\S]*\}/);
+    if (m) candidates.push(m[0]);
+
+    for (const candidate of candidates) {
+      try {
+        const obj = JSON.parse(candidate);
+        // Validate structure
+        if (
+          obj &&
+          Array.isArray(obj.captions) &&
+          obj.captions.length >= 1 &&
+          obj.captions.every(c => typeof c === 'string' && c.trim().length > 0) &&
+          Array.isArray(obj.hashtags) &&
+          obj.hashtags.length >= 1
+        ) {
+          return obj;
+        }
+      } catch (_) {}
+    }
+
+    return null; // unparseable or invalid structure
+  }
+
+  // Call Gemini once — returns { ok, data, errType, errMsg }
+  async function callGemini(model, promptText) {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
     try {
-      const geminiRes = await fetch(url, {
+      const r = await fetch(url, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          // ✅ NO Authorization header — AI Studio key auth via ?key= param only
-          // Adding Authorization would route to Vertex AI (paid) instead of AI Studio (free)
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt.trim() }] }],
+          contents: [{ parts: [{ text: promptText }] }],
           generationConfig: {
-            temperature: 0.9,
-            maxOutputTokens: 1024,
-            candidateCount: 1
+            temperature: 0.7,          // lower = more predictable JSON output
+            maxOutputTokens: 1200,     // enough for 3 captions + 10 hashtags
+            candidateCount: 1,
+            responseMimeType: 'application/json'  // force JSON mode where supported
           }
         })
       });
 
-      const data = await geminiRes.json();
+      const data = await r.json();
       const errMsg    = data?.error?.message || '';
       const errStatus = data?.error?.status  || '';
-      const errCode   = data?.error?.code    || geminiRes.status;
+      const errCode   = data?.error?.code    || r.status;
 
-      console.log(`[CaptionAI] Model ${MODEL} → HTTP ${geminiRes.status}, errStatus: ${errStatus || 'none'}`);
-
-      // If quota exceeded on this model → try next model
-      if (
-        errStatus === 'RESOURCE_EXHAUSTED' ||
-        errMsg.toLowerCase().includes('quota') ||
-        geminiRes.status === 429
-      ) {
-        console.log(`[CaptionAI] ${MODEL} quota exceeded — trying next model`);
-        lastError = { type: 'QUOTA_EXCEEDED', model: MODEL, msg: errMsg };
-        continue; // try next model
+      if (errStatus === 'RESOURCE_EXHAUSTED' || errMsg.toLowerCase().includes('quota') || r.status === 429) {
+        return { ok: false, errType: 'QUOTA_EXCEEDED', errMsg };
       }
-
-      // Invalid key → no point retrying other models
       if (errCode === 400 && errMsg.toLowerCase().includes('api key')) {
-        return res.status(401).json({
-          error: 'INVALID_API_KEY',
-          message: 'Invalid API key. Make sure GEMINI_API_KEY in Vercel is a valid AI Studio key from aistudio.google.com (starts with "AIzaSy...").'
-        });
+        return { ok: false, errType: 'INVALID_API_KEY', errMsg };
       }
-
-      // Not authorized / billing issue → no point retrying
       if (errCode === 403) {
-        return res.status(403).json({
-          error: 'KEY_NOT_AUTHORIZED',
-          message: 'API key not authorized. This usually means the key is from Google Cloud Console (NOT AI Studio). Please create a fresh key at aistudio.google.com and update GEMINI_API_KEY in Vercel.'
-        });
+        return { ok: false, errType: 'KEY_NOT_AUTHORIZED', errMsg };
+      }
+      if (!r.ok) {
+        return { ok: false, errType: 'GEMINI_ERROR', errMsg: errMsg || `HTTP ${r.status}` };
       }
 
-      // Other non-OK error
-      if (!geminiRes.ok) {
-        console.log(`[CaptionAI] ${MODEL} error: ${errCode} ${errMsg}`);
-        lastError = { type: 'GEMINI_ERROR', model: MODEL, msg: errMsg };
-        continue; // try next model
-      }
+      const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+      return { ok: true, raw };
 
-      // ✅ SUCCESS — extract text
-      const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-      if (!text) {
-        lastError = { type: 'EMPTY_RESPONSE', model: MODEL };
-        continue;
-      }
-
-      console.log(`[CaptionAI] ✅ Success with model: ${MODEL}`);
-      return res.status(200).json({ text, model: MODEL });
-
-    } catch (fetchErr) {
-      console.log(`[CaptionAI] Fetch error on ${MODEL}:`, fetchErr.message);
-      lastError = { type: 'NETWORK_ERROR', model: MODEL, msg: fetchErr.message };
-      continue;
+    } catch (e) {
+      return { ok: false, errType: 'NETWORK_ERROR', errMsg: e.message };
     }
   }
 
-  // ── ALL MODELS FAILED ─────────────────────────────────────────────────────
-  console.log('[CaptionAI] All models failed. Last error:', JSON.stringify(lastError));
+  // ── MODELS + RETRY CONFIG ────────────────────────────────────────────────
+  const MODELS = [
+    'gemini-2.0-flash-lite',
+    'gemini-1.5-flash',
+    'gemini-1.5-flash-8b',
+  ];
+  const MAX_JSON_RETRIES = 2; // per model: if Gemini returns bad JSON, retry prompt
 
-  if (lastError?.type === 'QUOTA_EXCEEDED') {
+  // Prompt instructs Gemini to return ONLY raw JSON — no prose, no fences
+  const SYSTEM_PROMPT = `${prompt.trim()}
+
+CRITICAL OUTPUT RULES — YOU MUST FOLLOW EXACTLY:
+- Output ONLY a single raw JSON object. Nothing else.
+- No markdown. No backticks. No code fences. No explanation. No extra text before or after.
+- The JSON must start with { and end with } on the last character of your response.
+- Every string value must be properly escaped.
+- Required structure (fill with real content):
+{"captions":["caption one","caption two","caption three"],"hashtags":["#tag1","#tag2","#tag3","#tag4","#tag5","#tag6","#tag7","#tag8","#tag9","#tag10"]}`;
+
+  // ── MAIN LOOP: model × retry ──────────────────────────────────────────────
+  let lastErrType = 'UNKNOWN_ERROR';
+  let lastErrMsg  = '';
+
+  for (const model of MODELS) {
+    console.log(`[CaptionAI] Trying model: ${model}`);
+
+    for (let attempt = 1; attempt <= MAX_JSON_RETRIES; attempt++) {
+      console.log(`[CaptionAI]   attempt ${attempt}/${MAX_JSON_RETRIES}`);
+
+      const result = await callGemini(model, SYSTEM_PROMPT);
+
+      if (!result.ok) {
+        console.log(`[CaptionAI]   API error: ${result.errType} — ${result.errMsg}`);
+        lastErrType = result.errType;
+        lastErrMsg  = result.errMsg;
+
+        // Fatal errors — stop everything, no point retrying any model
+        if (result.errType === 'INVALID_API_KEY' || result.errType === 'KEY_NOT_AUTHORIZED') {
+          return res.status(result.errType === 'INVALID_API_KEY' ? 401 : 403).json({
+            error: result.errType,
+            message: result.errMsg
+          });
+        }
+
+        // Quota on this model — skip to next model immediately
+        if (result.errType === 'QUOTA_EXCEEDED') break;
+
+        // Other errors — retry same model
+        continue;
+      }
+
+      // Got a raw text response — try to parse it
+      console.log(`[CaptionAI]   raw text length: ${result.raw.length}`);
+      console.log(`[CaptionAI]   raw preview: ${result.raw.substring(0, 120).replace(/\n/g, ' ')}`);
+
+      const parsed = parseGeminiText(result.raw);
+
+      if (parsed) {
+        console.log(`[CaptionAI] ✅ Valid JSON on model=${model} attempt=${attempt}`);
+        // Return clean validated structure — frontend gets ONLY this
+        return res.status(200).json({
+          captions: parsed.captions.slice(0, 3),   // max 3
+          hashtags: parsed.hashtags.slice(0, 10),  // max 10
+          model
+        });
+      }
+
+      // Bad JSON — log and retry
+      console.log(`[CaptionAI]   JSON parse/validation failed on attempt ${attempt}. Raw:`, result.raw.substring(0, 300));
+      lastErrType = 'BAD_JSON';
+      lastErrMsg  = 'Gemini returned incomplete or malformed JSON';
+      // loop continues → next attempt with same model
+    }
+
+    console.log(`[CaptionAI] Model ${model} exhausted all attempts — trying next model`);
+  }
+
+  // ── ALL MODELS + RETRIES FAILED ──────────────────────────────────────────
+  console.log('[CaptionAI] ❌ All models failed. Last error:', lastErrType, lastErrMsg);
+
+  if (lastErrType === 'QUOTA_EXCEEDED') {
     return res.status(429).json({
       error: 'QUOTA_EXCEEDED',
-      message: `All free-tier models quota exhausted for today. Free limit is 1500 requests/day. Please try again tomorrow.\n\nTried: ${MODELS.join(', ')}`
+      message: 'Free quota exceeded (1,500 req/day). Please try again tomorrow.'
     });
   }
 
   return res.status(500).json({
-    error: lastError?.type || 'UNKNOWN_ERROR',
-    message: lastError?.msg || 'All models failed. Please try again later.'
+    error: lastErrType,
+    message: lastErrMsg || 'All models failed after retries. Please try again.'
   });
 };
+
