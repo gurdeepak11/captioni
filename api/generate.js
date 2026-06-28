@@ -35,9 +35,9 @@ module.exports = async function handler(req, res) {
   // Try models in order until one works on the free tier
   // gemini-2.0-flash-lite → gemini-1.5-flash → gemini-1.5-flash-8b
   const MODELS = [
-    'gemini-2.0-flash-lite',   // Most generous free tier (30 RPM, 1500 RPD)
-    'gemini-1.5-flash',        // Fallback (15 RPM, 1500 RPD)
-    'gemini-1.5-flash-8b',     // Last resort (15 RPM, 1500 RPD)
+    'gemini-2.5-flash',   // Most generous free tier (30 RPM, 1500 RPD)
+    'gemini-2.5-flash',        // Fallback (15 RPM, 1500 RPD)
+    'gemini-2.5-flash',     // Last resort (15 RPM, 1500 RPD)
   ];
 
   // ── CALL GEMINI WITH FALLBACK ─────────────────────────────────────────────
