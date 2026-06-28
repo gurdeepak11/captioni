@@ -615,57 +615,23 @@ Rules:
       return;
     }
 
-    // ✅ Bulletproof JSON extractor — handles all Gemini response formats:
-    // 1. Clean JSON             {"captions":[...]}
-    // 2. Markdown json fence    ```json\n{...}\n```
-    // 3. Markdown plain fence   ```\n{...}\n```
-    // 4. JSON buried in text    "Here are captions: {...} Hope you like!"
-    // 5. Extra whitespace/BOM   invisible chars before or after JSON
+    // ✅ Server now returns pre-parsed, validated JSON directly:
+    // { captions: [...], hashtags: [...], model: "..." }
+    // No client-side JSON extraction needed.
 
-    const raw = data.text || '';
+    const captions = data.captions;
+    const hashtags = data.hashtags;
+    const model    = data.model;
 
-    function extractJSON(str) {
-      // Step 1: strip BOM and invisible chars
-      let s = str.replace(/^\uFEFF/, '').trim();
-
-      // Step 2: strip markdown fences (```json...``` or ```...```)
-      s = s.replace(/^```(?:json)?\s*/im, '').replace(/\s*```\s*$/im, '').trim();
-
-      // Step 3: try direct parse first (fastest path)
-      try { return JSON.parse(s); } catch (_) {}
-
-      // Step 4: extract outermost { } block with greedy regex
-      const match = s.match(/\{[\s\S]*\}/);
-      if (match) {
-        try { return JSON.parse(match[0]); } catch (_) {}
-
-        // Step 5: slice between first { and last } and retry
-        const firstBrace = s.indexOf('{');
-        const lastBrace  = s.lastIndexOf('}');
-        if (firstBrace !== -1 && lastBrace > firstBrace) {
-          try { return JSON.parse(s.slice(firstBrace, lastBrace + 1)); } catch (_) {}
-        }
-      }
-
-      return null; // all attempts failed
-    }
-
-    const parsed = extractJSON(raw);
-    if (!parsed) {
-      showError('⚠️ AI returned unexpected format. Please click Generate again.');
-      console.error('[CaptionAI] JSON parse failed. Raw Gemini response:', raw);
+    // Sanity check (should never fail — server already validated)
+    if (!Array.isArray(captions) || captions.length === 0) {
+      showError('⚠️ No captions received. Please try again.');
+      console.error('[CaptionAI] Unexpected response shape:', data);
       return;
     }
 
-    if (!parsed.captions || !Array.isArray(parsed.captions) || parsed.captions.length === 0) {
-      showError('⚠️ No captions were generated. Please try again with a more detailed topic.');
-      return;
-    }
-
-    // Show which model was used (optional info)
-    if (data.model) console.log('✅ Generated using:', data.model);
-
-    renderCaptions(parsed.captions, parsed.hashtags);
+    console.log('[CaptionAI] ✅ Generated using model:', model);
+    renderCaptions(captions, hashtags);
 
   } catch (err) {
     showError('🌐 Network error. Check your internet connection and try again.');
