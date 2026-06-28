@@ -685,17 +685,58 @@ function renderCaptions(captions, hashtags) {
   captions.forEach((cap, i) => {
     const card = document.createElement('div');
     card.className = 'cap-card';
-    card.innerHTML = `
-      <div class="cap-num">${i + 1}</div>
-      <div class="cap-text">${escHtml(cap)}</div>
-      <div class="cap-actions">
-        <button class="cap-action-btn" onclick="copyCaption(this, ${JSON.stringify(cap)})">
-          <i class="fa-regular fa-copy"></i> Copy
-        </button>
-        <button class="cap-action-btn" onclick="copyWithHashtags(this, ${JSON.stringify(cap)}, ${JSON.stringify(hashtags)})">
-          <i class="fa-solid fa-hashtag"></i> Copy + Hashtags
-        </button>
-      </div>`;
+
+    // ✅ FIX: Build DOM nodes — NO inline onclick, NO JSON.stringify in template literals
+    // Inline onclick="copyCaption(this, ${JSON.stringify(cap)})" breaks when caption
+    // contains quotes, apostrophes, emojis, or newlines → "Unexpected end of input"
+
+    const numDiv = document.createElement('div');
+    numDiv.className = 'cap-num';
+    numDiv.textContent = i + 1;
+
+    const textDiv = document.createElement('div');
+    textDiv.className = 'cap-text';
+    textDiv.textContent = cap; // textContent is XSS-safe, no escHtml needed
+
+    const actionsDiv = document.createElement('div');
+    actionsDiv.className = 'cap-actions';
+
+    // Copy button
+    const copyBtn = document.createElement('button');
+    copyBtn.className = 'cap-action-btn';
+    copyBtn.innerHTML = '<i class="fa-regular fa-copy"></i> Copy';
+    copyBtn.addEventListener('click', () => {
+      navigator.clipboard.writeText(cap).then(() => {
+        copyBtn.classList.add('copied');
+        copyBtn.innerHTML = '<i class="fa-solid fa-check"></i> Copied!';
+        setTimeout(() => {
+          copyBtn.classList.remove('copied');
+          copyBtn.innerHTML = '<i class="fa-regular fa-copy"></i> Copy';
+        }, 2000);
+      });
+    });
+
+    // Copy + Hashtags button
+    const hashBtn = document.createElement('button');
+    hashBtn.className = 'cap-action-btn';
+    hashBtn.innerHTML = '<i class="fa-solid fa-hashtag"></i> Copy + Hashtags';
+    hashBtn.addEventListener('click', () => {
+      const full = cap + '\n\n' + (hashtags || []).join(' ');
+      navigator.clipboard.writeText(full).then(() => {
+        hashBtn.classList.add('copied');
+        hashBtn.innerHTML = '<i class="fa-solid fa-check"></i> Copied!';
+        setTimeout(() => {
+          hashBtn.classList.remove('copied');
+          hashBtn.innerHTML = '<i class="fa-solid fa-hashtag"></i> Copy + Hashtags';
+        }, 2000);
+      });
+    });
+
+    actionsDiv.appendChild(copyBtn);
+    actionsDiv.appendChild(hashBtn);
+    card.appendChild(numDiv);
+    card.appendChild(textDiv);
+    card.appendChild(actionsDiv);
     cards.appendChild(card);
   });
 
@@ -708,11 +749,11 @@ function renderCaptions(captions, hashtags) {
       const span = document.createElement('span');
       span.className = 'hashtag';
       span.textContent = tag;
-      span.onclick = () => {
+      span.addEventListener('click', () => {
         navigator.clipboard.writeText(tag);
         span.textContent = '✓ Copied!';
-        setTimeout(() => span.textContent = tag, 1500);
-      };
+        setTimeout(() => { span.textContent = tag; }, 1500);
+      });
       hashWrap.appendChild(span);
     });
     hashSection.style.display = 'block';
@@ -720,23 +761,6 @@ function renderCaptions(captions, hashtags) {
 
   document.getElementById('results').style.display = 'block';
   document.getElementById('results').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-}
-
-function copyCaption(btn, text) {
-  navigator.clipboard.writeText(text).then(() => {
-    btn.classList.add('copied');
-    btn.innerHTML = '<i class="fa-solid fa-check"></i> Copied!';
-    setTimeout(() => { btn.classList.remove('copied'); btn.innerHTML = '<i class="fa-regular fa-copy"></i> Copy'; }, 2000);
-  });
-}
-
-function copyWithHashtags(btn, text, hashtags) {
-  const full = text + '\n\n' + (hashtags || []).join(' ');
-  navigator.clipboard.writeText(full).then(() => {
-    btn.classList.add('copied');
-    btn.innerHTML = '<i class="fa-solid fa-check"></i> Copied!';
-    setTimeout(() => { btn.classList.remove('copied'); btn.innerHTML = '<i class="fa-solid fa-hashtag"></i> Copy + Hashtags'; }, 2000);
-  });
 }
 
 function showError(msg) {
