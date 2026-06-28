@@ -615,28 +615,46 @@ Rules:
       return;
     }
 
-    // ✅ Robust JSON parsing — strip markdown fences
-    const raw   = data.text || '';
-    const clean = raw
-      .replace(/^```json\s*/i, '')
-      .replace(/^```\s*/i, '')
-      .replace(/\s*```$/i, '')
-      .trim();
+    // ✅ Bulletproof JSON extractor — handles all Gemini response formats:
+    // 1. Clean JSON             {"captions":[...]}
+    // 2. Markdown json fence    ```json\n{...}\n```
+    // 3. Markdown plain fence   ```\n{...}\n```
+    // 4. JSON buried in text    "Here are captions: {...} Hope you like!"
+    // 5. Extra whitespace/BOM   invisible chars before or after JSON
 
-    let parsed;
-    try {
-      parsed = JSON.parse(clean);
-    } catch (parseErr) {
-      // Try extracting JSON from inside the text
-      const jsonMatch = clean.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        try { parsed = JSON.parse(jsonMatch[0]); } catch(e) {}
+    const raw = data.text || '';
+
+    function extractJSON(str) {
+      // Step 1: strip BOM and invisible chars
+      let s = str.replace(/^\uFEFF/, '').trim();
+
+      // Step 2: strip markdown fences (```json...``` or ```...```)
+      s = s.replace(/^```(?:json)?\s*/im, '').replace(/\s*```\s*$/im, '').trim();
+
+      // Step 3: try direct parse first (fastest path)
+      try { return JSON.parse(s); } catch (_) {}
+
+      // Step 4: extract outermost { } block with greedy regex
+      const match = s.match(/\{[\s\S]*\}/);
+      if (match) {
+        try { return JSON.parse(match[0]); } catch (_) {}
+
+        // Step 5: slice between first { and last } and retry
+        const firstBrace = s.indexOf('{');
+        const lastBrace  = s.lastIndexOf('}');
+        if (firstBrace !== -1 && lastBrace > firstBrace) {
+          try { return JSON.parse(s.slice(firstBrace, lastBrace + 1)); } catch (_) {}
+        }
       }
-      if (!parsed) {
-        showError('⚠️ AI returned unexpected format. Please click Generate again.');
-        console.error('JSON parse failed. Raw response:', raw);
-        return;
-      }
+
+      return null; // all attempts failed
+    }
+
+    const parsed = extractJSON(raw);
+    if (!parsed) {
+      showError('⚠️ AI returned unexpected format. Please click Generate again.');
+      console.error('[CaptionAI] JSON parse failed. Raw Gemini response:', raw);
+      return;
     }
 
     if (!parsed.captions || !Array.isArray(parsed.captions) || parsed.captions.length === 0) {
